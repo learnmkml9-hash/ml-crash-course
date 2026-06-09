@@ -3,3 +3,9 @@ __pycache__/
 .ipynb_checkpoints/
 .DS_Store
 *.pyc
+# Local ML data and model artifacts
+data/
+checkpoints/
+*.pt
+*.pth
+*.tar.gz
