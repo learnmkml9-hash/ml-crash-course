@@ -9,3 +9,7 @@ checkpoints/
 *.pt
 *.pth
 *.tar.gz
+
+# Hugging Face outputs
+hf_outputs/
+saved_models/
