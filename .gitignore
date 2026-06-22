@@ -13,3 +13,17 @@ checkpoints/
 # Hugging Face outputs
 hf_outputs/
 saved_models/
+
+.venv/
+.venv312/
+data/
+checkpoints/
+hf_outputs/
+saved_models/
+*.pt
+*.pth
+*.tar.gz
+__pycache__/
+.ipynb_checkpoints/
+.DS_Store
+*.pyc
