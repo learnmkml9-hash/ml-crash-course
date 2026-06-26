@@ -33,3 +33,17 @@ logs/*.out
 logs/*.err
 runs/
 slurm-*.out
+
+# Cluster logs and run outputs
+logs/*.out
+logs/*.err
+runs/
+slurm-*.out
+
+# Cluster/HF artifacts
+hf_outputs/
+saved_models/
+checkpoints/
+*.pt
+*.pth
+*.safetensors
