@@ -27,3 +27,9 @@ __pycache__/
 .ipynb_checkpoints/
 .DS_Store
 *.pyc
+
+# Cluster logs and run outputs
+logs/*.out
+logs/*.err
+runs/
+slurm-*.out
