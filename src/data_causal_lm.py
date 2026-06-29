@@ -1,0 +1,119 @@
+import numpy as np
+from datasets import Dataset
+from torch.utils.data import DataLoader
+from transformers import DataCollatorForLanguageModeling
+
+
+def build_tiny_story_corpus():
+    base_text = """
+    The robot entered the laboratory and looked at the glowing console.
+    The scientist asked the robot to inspect the strange signal.
+    The robot noticed that the signal repeated every seven seconds.
+    The scientist wrote the pattern in a notebook and smiled.
+
+    The drone flew over the forest and mapped the river.
+    The engineer asked the drone to return before sunset.
+    The drone found a hidden bridge near the old trees.
+    The engineer studied the map and planned a safer route.
+
+    The rover crossed the dusty valley and climbed the red hill.
+    The mission team asked the rover to search for ice.
+    The rover detected a faint trace beneath the rocks.
+    The mission team celebrated the discovery.
+
+    The assistant read the question carefully and wrote a clear answer.
+    The student tested the code and found a small bug.
+    The assistant explained the error and suggested a simple fix.
+    The student ran the program again and the result was correct.
+    """
+
+    text = "\n".join(
+        line.strip()
+        for line in base_text.strip().splitlines()
+        if line.strip()
+    )
+
+    return (text + "\n") * 200
+
+
+def create_text_dataset(text, train_fraction=0.9, seed=0):
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+
+    rng = np.random.default_rng(seed)
+    indices = rng.permutation(len(lines))
+
+    num_train = int(train_fraction * len(lines))
+
+    train_lines = [lines[i] for i in indices[:num_train]]
+    val_lines = [lines[i] for i in indices[num_train:]]
+
+    train_dataset = Dataset.from_dict({"text": train_lines})
+    val_dataset = Dataset.from_dict({"text": val_lines})
+
+    return train_dataset, val_dataset
+
+
+def tokenize_and_group_texts(train_dataset, val_dataset, tokenizer, block_size):
+    def tokenize_function(examples):
+        return tokenizer(examples["text"])
+
+    tokenized_train = train_dataset.map(
+        tokenize_function,
+        batched=True,
+        remove_columns=["text"],
+    )
+
+    tokenized_val = val_dataset.map(
+        tokenize_function,
+        batched=True,
+        remove_columns=["text"],
+    )
+
+    def group_texts(examples):
+        concatenated = {}
+
+        for key in examples.keys():
+            concatenated[key] = sum(examples[key], [])
+
+        total_length = len(concatenated["input_ids"])
+        total_length = (total_length // block_size) * block_size
+
+        result = {}
+
+        for key, tokens in concatenated.items():
+            result[key] = [
+                tokens[i : i + block_size]
+                for i in range(0, total_length, block_size)
+            ]
+
+        return result
+
+    lm_train = tokenized_train.map(group_texts, batched=True)
+    lm_val = tokenized_val.map(group_texts, batched=True)
+
+    return lm_train, lm_val
+
+
+def create_causal_lm_dataloaders(lm_train, lm_val, tokenizer, batch_size):
+    data_collator = DataCollatorForLanguageModeling(
+        tokenizer=tokenizer,
+        mlm=False,
+    )
+
+    train_loader = DataLoader(
+        lm_train,
+        batch_size=batch_size,
+        shuffle=True,
+        collate_fn=data_collator,
+        num_workers=0,
+    )
+
+    val_loader = DataLoader(
+        lm_val,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=data_collator,
+        num_workers=0,
+    )
+
+    return train_loader, val_loader
