@@ -6,9 +6,9 @@ import torch.optim as optim
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from data_causal_lm import (
-    build_tiny_story_corpus,
+    LOCAL_TINY_DATASET_NAME,
     create_causal_lm_dataloaders,
-    create_text_dataset,
+    load_text_datasets,
     tokenize_and_group_texts,
 )
 from utils_cluster import (
@@ -36,6 +36,14 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--dry_run", action="store_true")
     parser.add_argument("--cpu_safe_generation", action="store_true")
+    parser.add_argument("--dataset_name", default=LOCAL_TINY_DATASET_NAME)
+    parser.add_argument("--dataset_config", default=None)
+    parser.add_argument("--text_column", default="text")
+    parser.add_argument("--train_split", default="train")
+    parser.add_argument("--validation_split", default="validation")
+    parser.add_argument("--max_train_examples", type=int, default=None)
+    parser.add_argument("--max_val_examples", type=int, default=None)
+    parser.add_argument("--streaming", action="store_true")
     return parser.parse_args()
 
 
@@ -226,25 +234,30 @@ def load_tokenizer_and_model(model_checkpoint, device):
     return tokenizer, model
 
 
-def build_dataloaders(tokenizer, block_size, batch_size, seed):
-    text = build_tiny_story_corpus()
-
-    train_dataset, val_dataset = create_text_dataset(
-        text=text,
-        train_fraction=0.9,
-        seed=seed,
+def build_dataloaders(tokenizer, args):
+    train_dataset, val_dataset, dataset_metadata = load_text_datasets(
+        dataset_name=args.dataset_name,
+        dataset_config=args.dataset_config,
+        text_column=args.text_column,
+        train_split=args.train_split,
+        validation_split=args.validation_split,
+        max_train_examples=args.max_train_examples,
+        max_val_examples=args.max_val_examples,
+        streaming=args.streaming,
+        seed=args.seed,
     )
 
     print("\nRaw dataset sizes:")
-    print("train lines:", len(train_dataset))
-    print("validation lines:", len(val_dataset))
+    print("train examples:", len(train_dataset))
+    print("validation examples:", len(val_dataset))
 
     print("\nTokenizing and grouping text...")
     lm_train, lm_val = tokenize_and_group_texts(
         train_dataset=train_dataset,
         val_dataset=val_dataset,
         tokenizer=tokenizer,
-        block_size=block_size,
+        block_size=args.block_size,
+        text_column=dataset_metadata["text_column"],
     )
 
     print("\nLanguage modeling dataset sizes:")
@@ -258,10 +271,13 @@ def build_dataloaders(tokenizer, block_size, batch_size, seed):
         lm_train=lm_train,
         lm_val=lm_val,
         tokenizer=tokenizer,
-        batch_size=batch_size,
+        batch_size=args.batch_size,
     )
 
-    return train_loader, val_loader, len(lm_train), len(lm_val)
+    dataset_metadata["train_chunks"] = len(lm_train)
+    dataset_metadata["val_chunks"] = len(lm_val)
+
+    return train_loader, val_loader, dataset_metadata
 
 
 def run_dry_run(model, train_loader, device):
@@ -292,6 +308,8 @@ def main():
     print("PyTorch version:", torch.__version__)
     print("\nModel checkpoint:")
     print(args.model_checkpoint)
+    print("\nDataset:")
+    print(args.dataset_name)
     print("\nOutput directory:")
     print(output_dir)
 
@@ -300,11 +318,9 @@ def main():
         device=device,
     )
 
-    train_loader, val_loader, train_chunks, val_chunks = build_dataloaders(
+    train_loader, val_loader, dataset_metadata = build_dataloaders(
         tokenizer=tokenizer,
-        block_size=args.block_size,
-        batch_size=args.batch_size,
-        seed=args.seed,
+        args=args,
     )
 
     total_params, trainable_params = count_parameters(model)
@@ -408,10 +424,7 @@ def main():
             "total": total_params,
             "trainable": trainable_params,
         },
-        "dataset": {
-            "train_chunks": train_chunks,
-            "val_chunks": val_chunks,
-        },
+        "dataset": dataset_metadata,
         "validation": {
             "loss_before": val_loss_before,
             "perplexity_before": val_ppl_before,
