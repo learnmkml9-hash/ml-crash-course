@@ -72,7 +72,74 @@ def parse_args():
     parser.add_argument("--max_train_examples", type=int, default=None)
     parser.add_argument("--max_val_examples", type=int, default=None)
     parser.add_argument("--streaming", action="store_true")
+    parser.add_argument("--use_wandb", action="store_true")
+    parser.add_argument("--wandb_project", default="ml-crash-course")
+    parser.add_argument("--wandb_entity", default=None)
+    parser.add_argument("--wandb_run_name", default=None)
+    parser.add_argument("--wandb_mode", default=None)
+    parser.add_argument("--log_interval", type=int, default=20)
     return parser.parse_args()
+
+
+def init_wandb(args):
+    if not args.use_wandb:
+        return None
+
+    try:
+        import wandb
+    except ImportError as exc:
+        raise ImportError(
+            "Weights & Biases tracking requires the optional wandb package. "
+            "Install it with: pip install wandb"
+        ) from exc
+
+    init_kwargs = {
+        "project": args.wandb_project,
+        "entity": args.wandb_entity,
+        "name": args.wandb_run_name,
+        "mode": args.wandb_mode,
+        "config": vars(args),
+    }
+    init_kwargs = {
+        key: value
+        for key, value in init_kwargs.items()
+        if value is not None
+    }
+
+    return wandb.init(**init_kwargs)
+
+
+def update_wandb_summary(wandb_run, summary):
+    if wandb_run is None:
+        return
+
+    wandb_run.summary["final/val_loss"] = summary["validation"]["loss_after"]
+    wandb_run.summary["final/val_perplexity"] = summary["validation"]["perplexity_after"]
+    wandb_run.summary["best_checkpoint"] = summary["best_checkpoint"]
+    wandb_run.summary["timing"] = summary["timing"]
+    wandb_run.summary["dataset"] = summary["dataset"]
+
+
+def log_generated_samples_to_wandb(wandb_run, generated_samples):
+    if wandb_run is None:
+        return
+
+    try:
+        import wandb
+    except ImportError:
+        return
+
+    rows = []
+
+    for phase, samples in generated_samples.items():
+        for prompt, text in samples.items():
+            rows.append([phase, prompt, text])
+
+    table = wandb.Table(
+        columns=["phase", "prompt", "generated_text"],
+        data=rows,
+    )
+    wandb_run.log({"generated_samples": table})
 
 
 def move_batch_to_device(batch, device):
@@ -113,6 +180,9 @@ def train_model(
     learning_rate,
     weight_decay,
     num_epochs,
+    wandb_run=None,
+    log_interval=20,
+    start_time_seconds=None,
 ):
     optimizer = optim.AdamW(
         model.parameters(),
@@ -123,6 +193,7 @@ def train_model(
     best_val_loss = float("inf")
     best_checkpoint = None
     global_step = 0
+    tokens_seen = 0
 
     for epoch in range(num_epochs):
         model.train()
@@ -151,12 +222,35 @@ def train_model(
             batch_size = batch["input_ids"].shape[0]
             total_train_loss += loss.item() * batch_size
             total_train_examples += batch_size
+            tokens_seen += int(batch.get("attention_mask", batch["input_ids"]).sum().item())
 
             if global_step % 20 == 0:
                 print(
                     f"Epoch {epoch + 1:2d} | "
                     f"Step {global_step:4d} | "
                     f"Batch loss = {loss.item():.4f}"
+                )
+
+            if (
+                wandb_run is not None
+                and log_interval > 0
+                and global_step % log_interval == 0
+            ):
+                elapsed_seconds = None
+
+                if start_time_seconds is not None:
+                    elapsed_seconds = time.perf_counter() - start_time_seconds
+
+                wandb_run.log(
+                    {
+                        "train/loss": loss.item(),
+                        "epoch": epoch + 1,
+                        "global_step": global_step,
+                        "learning_rate": optimizer.param_groups[0]["lr"],
+                        "tokens_seen": tokens_seen,
+                        "wall_clock_time_seconds": elapsed_seconds,
+                    },
+                    step=global_step,
                 )
 
         train_loss = total_train_loss / total_train_examples
@@ -323,163 +417,216 @@ def run_dry_run(model, train_loader, device):
 
     print("Dry-run loss:", outputs.loss.item())
 
+    return outputs.loss.item()
+
 
 def main():
     start_time_seconds = time.perf_counter()
     started_at = datetime.now().astimezone().isoformat()
+    wandb_run = None
 
-    configure_runtime()
-    args = parse_args()
-    set_seed(args.seed)
+    try:
+        configure_runtime()
+        args = parse_args()
+        set_seed(args.seed)
+        wandb_run = init_wandb(args)
 
-    output_dir = ensure_output_dir(args.output_dir)
-    device = get_device()
+        output_dir = ensure_output_dir(args.output_dir)
+        device = get_device()
 
-    print("Using device:", device)
-    print("PyTorch version:", torch.__version__)
-    print("\nModel checkpoint:")
-    print(args.model_checkpoint)
-    print("\nDataset:")
-    print(args.dataset_name)
-    print("\nOutput directory:")
-    print(output_dir)
+        print("Using device:", device)
+        print("PyTorch version:", torch.__version__)
+        print("\nModel checkpoint:")
+        print(args.model_checkpoint)
+        print("\nDataset:")
+        print(args.dataset_name)
+        print("\nOutput directory:")
+        print(output_dir)
 
-    tokenizer, model = load_tokenizer_and_model(
-        model_checkpoint=args.model_checkpoint,
-        device=device,
-    )
-
-    train_loader, val_loader, dataset_metadata = build_dataloaders(
-        tokenizer=tokenizer,
-        args=args,
-    )
-
-    total_params, trainable_params = count_parameters(model)
-
-    print("\nModel:")
-    print(model.__class__.__name__)
-    print("Total parameters:", total_params)
-    print("Trainable parameters:", trainable_params)
-
-    if args.dry_run:
-        run_dry_run(
-            model=model,
-            train_loader=train_loader,
+        tokenizer, model = load_tokenizer_and_model(
+            model_checkpoint=args.model_checkpoint,
             device=device,
         )
-        return
 
-    prompts = ["The robot", "The scientist", "The drone", "The assistant"]
+        train_loader, val_loader, dataset_metadata = build_dataloaders(
+            tokenizer=tokenizer,
+            args=args,
+        )
 
-    print("\nGeneration before fine-tuning:")
-    before_samples = {}
-    before_samples["The robot"] = generate_text(
-        model=model,
-        tokenizer=tokenizer,
-        prompt="The robot",
-        max_new_tokens=60,
-        cpu_safe_generation=args.cpu_safe_generation,
-    )
-    print(before_samples["The robot"])
+        total_params, trainable_params = count_parameters(model)
 
-    print("\nEvaluating before fine-tuning...")
-    val_loss_before, val_ppl_before = evaluate(
-        model=model,
-        data_loader=val_loader,
-        device=device,
-    )
+        if wandb_run is not None:
+            wandb_run.config.update(
+                {
+                    "model_name": model.__class__.__name__,
+                    "parameter_counts": {
+                        "total": total_params,
+                        "trainable": trainable_params,
+                    },
+                    "dataset": dataset_metadata,
+                },
+                allow_val_change=True,
+            )
 
-    print("Validation loss before:", val_loss_before)
-    print("Validation perplexity before:", val_ppl_before)
+        print("\nModel:")
+        print(model.__class__.__name__)
+        print("Total parameters:", total_params)
+        print("Trainable parameters:", trainable_params)
 
-    print("\nManual fine-tuning...\n")
+        if args.dry_run:
+            dry_run_loss = run_dry_run(
+                model=model,
+                train_loader=train_loader,
+                device=device,
+            )
 
-    best_checkpoint = train_model(
-        model=model,
-        train_loader=train_loader,
-        val_loader=val_loader,
-        device=device,
-        learning_rate=args.learning_rate,
-        weight_decay=args.weight_decay,
-        num_epochs=args.num_epochs,
-    )
+            if wandb_run is not None:
+                wandb_run.log({"dry_run/loss": dry_run_loss})
 
-    if best_checkpoint is None:
-        raise RuntimeError("Training finished without producing a checkpoint.")
+            return
 
-    model.load_state_dict(best_checkpoint["model_state_dict"])
+        prompts = ["The robot", "The scientist", "The drone", "The assistant"]
 
-    print("\nLoaded best checkpoint from memory:")
-    print("Epoch:", best_checkpoint["epoch"] + 1)
-    print("Global step:", best_checkpoint["global_step"])
-    print("Validation loss:", best_checkpoint["val_loss"])
-    print("Validation perplexity:", best_checkpoint["val_ppl"])
-
-    val_loss_after, val_ppl_after = evaluate(
-        model=model,
-        data_loader=val_loader,
-        device=device,
-    )
-
-    print("\nValidation loss after:", val_loss_after)
-    print("Validation perplexity after:", val_ppl_after)
-
-    print("\nGeneration after fine-tuning:")
-    after_samples = {}
-
-    for prompt in prompts:
-        print("\nPrompt:", prompt)
-        sample = generate_text(
+        print("\nGeneration before fine-tuning:")
+        before_samples = {}
+        before_samples["The robot"] = generate_text(
             model=model,
             tokenizer=tokenizer,
-            prompt=prompt,
-            max_new_tokens=80,
+            prompt="The robot",
+            max_new_tokens=60,
             cpu_safe_generation=args.cpu_safe_generation,
         )
-        after_samples[prompt] = sample
-        print(sample)
+        print(before_samples["The robot"])
 
-    summary = {
-        "model_checkpoint": args.model_checkpoint,
-        "model_name": model.__class__.__name__,
-        "hyperparameters": {
-            "block_size": args.block_size,
-            "batch_size": args.batch_size,
-            "num_epochs": args.num_epochs,
-            "learning_rate": args.learning_rate,
-            "weight_decay": args.weight_decay,
-            "seed": args.seed,
-            "cpu_safe_generation": args.cpu_safe_generation,
-        },
-        "parameter_counts": {
-            "total": total_params,
-            "trainable": trainable_params,
-        },
-        "dataset": dataset_metadata,
-        "validation": {
-            "loss_before": val_loss_before,
-            "perplexity_before": val_ppl_before,
-            "loss_after": val_loss_after,
-            "perplexity_after": val_ppl_after,
-        },
-        "best_checkpoint": {
-            "epoch": best_checkpoint["epoch"] + 1,
-            "global_step": best_checkpoint["global_step"],
-            "val_loss": best_checkpoint["val_loss"],
-            "val_ppl": best_checkpoint["val_ppl"],
-        },
-        "generated_samples": {
-            "before": before_samples,
-            "after": after_samples,
-        },
-        "timing": build_timing_metadata(
+        print("\nEvaluating before fine-tuning...")
+        val_loss_before, val_ppl_before = evaluate(
+            model=model,
+            data_loader=val_loader,
+            device=device,
+        )
+
+        print("Validation loss before:", val_loss_before)
+        print("Validation perplexity before:", val_ppl_before)
+
+        if wandb_run is not None:
+            wandb_run.log(
+                {
+                    "eval/loss": val_loss_before,
+                    "eval/perplexity": val_ppl_before,
+                    "eval/phase": "before_training",
+                }
+            )
+
+        print("\nManual fine-tuning...\n")
+
+        best_checkpoint = train_model(
+            model=model,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            device=device,
+            learning_rate=args.learning_rate,
+            weight_decay=args.weight_decay,
+            num_epochs=args.num_epochs,
+            wandb_run=wandb_run,
+            log_interval=args.log_interval,
+            start_time_seconds=start_time_seconds,
+        )
+
+        if best_checkpoint is None:
+            raise RuntimeError("Training finished without producing a checkpoint.")
+
+        model.load_state_dict(best_checkpoint["model_state_dict"])
+
+        print("\nLoaded best checkpoint from memory:")
+        print("Epoch:", best_checkpoint["epoch"] + 1)
+        print("Global step:", best_checkpoint["global_step"])
+        print("Validation loss:", best_checkpoint["val_loss"])
+        print("Validation perplexity:", best_checkpoint["val_ppl"])
+
+        val_loss_after, val_ppl_after = evaluate(
+            model=model,
+            data_loader=val_loader,
+            device=device,
+        )
+
+        print("\nValidation loss after:", val_loss_after)
+        print("Validation perplexity after:", val_ppl_after)
+
+        if wandb_run is not None:
+            wandb_run.log(
+                {
+                    "eval/loss": val_loss_after,
+                    "eval/perplexity": val_ppl_after,
+                    "eval/phase": "after_training",
+                    "global_step": best_checkpoint["global_step"],
+                },
+            )
+
+        print("\nGeneration after fine-tuning:")
+        after_samples = {}
+
+        for prompt in prompts:
+            print("\nPrompt:", prompt)
+            sample = generate_text(
+                model=model,
+                tokenizer=tokenizer,
+                prompt=prompt,
+                max_new_tokens=80,
+                cpu_safe_generation=args.cpu_safe_generation,
+            )
+            after_samples[prompt] = sample
+            print(sample)
+
+        timing_metadata = build_timing_metadata(
             started_at=started_at,
             start_time_seconds=start_time_seconds,
-        ),
-    }
+        )
+        generated_samples = {
+            "before": before_samples,
+            "after": after_samples,
+        }
 
-    summary_path = write_summary(output_dir, summary)
-    print("\nWrote summary:", summary_path)
+        summary = {
+            "model_checkpoint": args.model_checkpoint,
+            "model_name": model.__class__.__name__,
+            "hyperparameters": {
+                "block_size": args.block_size,
+                "batch_size": args.batch_size,
+                "num_epochs": args.num_epochs,
+                "learning_rate": args.learning_rate,
+                "weight_decay": args.weight_decay,
+                "seed": args.seed,
+                "cpu_safe_generation": args.cpu_safe_generation,
+            },
+            "parameter_counts": {
+                "total": total_params,
+                "trainable": trainable_params,
+            },
+            "dataset": dataset_metadata,
+            "validation": {
+                "loss_before": val_loss_before,
+                "perplexity_before": val_ppl_before,
+                "loss_after": val_loss_after,
+                "perplexity_after": val_ppl_after,
+            },
+            "best_checkpoint": {
+                "epoch": best_checkpoint["epoch"] + 1,
+                "global_step": best_checkpoint["global_step"],
+                "val_loss": best_checkpoint["val_loss"],
+                "val_ppl": best_checkpoint["val_ppl"],
+            },
+            "generated_samples": generated_samples,
+            "timing": timing_metadata,
+        }
+
+        update_wandb_summary(wandb_run, summary)
+        log_generated_samples_to_wandb(wandb_run, generated_samples)
+
+        summary_path = write_summary(output_dir, summary)
+        print("\nWrote summary:", summary_path)
+    finally:
+        if wandb_run is not None:
+            wandb_run.finish()
 
 
 if __name__ == "__main__":

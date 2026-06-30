@@ -34,9 +34,12 @@ export HF_HOME=/scratch/user/$USER/hf_cache
 export HF_DATASETS_CACHE=/scratch/user/$USER/hf_cache/datasets
 export TRANSFORMERS_CACHE=/scratch/user/$USER/hf_cache/transformers
 export TOKENIZERS_PARALLELISM=false
+export WANDB_DIR=/scratch/user/$USER/wandb
+export WANDB_CACHE_DIR=/scratch/user/$USER/wandb/cache
 
 OUTPUT_DIR=/scratch/user/$USER/ml-runs/lesson26_real_dataset_causal_lm/${SLURM_JOB_ID}
 mkdir -p "$OUTPUT_DIR"
+mkdir -p "$WANDB_DIR" "$WANDB_CACHE_DIR"
 
 echo ""
 echo "Python package check:"

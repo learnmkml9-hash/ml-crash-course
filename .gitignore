@@ -27,6 +27,8 @@ hf_outputs/
 # Local experiment outputs
 runs/
 outputs/
+wandb/
+.wandb/
 
 # Slurm and cluster logs
 logs/*.out
@@ -36,3 +38,4 @@ slurm-*.out
 # Hugging Face / experiment caches if created inside repo
 .cache/
 hf_cache/
+
