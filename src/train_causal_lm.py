@@ -1,5 +1,9 @@
 import argparse
 import copy
+import os
+import socket
+import time
+from datetime import datetime
 
 import torch
 import torch.optim as optim
@@ -20,6 +24,30 @@ from utils_cluster import (
     set_seed,
     write_summary,
 )
+
+
+def format_seconds_hms(total_seconds):
+    total_seconds = int(round(total_seconds))
+    hours = total_seconds // 3600
+    minutes = (total_seconds % 3600) // 60
+    seconds = total_seconds % 60
+
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
+def build_timing_metadata(started_at, start_time_seconds):
+    finished_at = datetime.now().astimezone().isoformat()
+    wall_time_seconds = time.perf_counter() - start_time_seconds
+
+    return {
+        "python_wall_time_seconds": wall_time_seconds,
+        "python_wall_time_hms": format_seconds_hms(wall_time_seconds),
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
+        "slurm_job_name": os.environ.get("SLURM_JOB_NAME"),
+        "slurm_node": os.environ.get("SLURMD_NODENAME") or socket.gethostname(),
+    }
 
 
 def parse_args():
@@ -297,6 +325,9 @@ def run_dry_run(model, train_loader, device):
 
 
 def main():
+    start_time_seconds = time.perf_counter()
+    started_at = datetime.now().astimezone().isoformat()
+
     configure_runtime()
     args = parse_args()
     set_seed(args.seed)
@@ -441,6 +472,10 @@ def main():
             "before": before_samples,
             "after": after_samples,
         },
+        "timing": build_timing_metadata(
+            started_at=started_at,
+            start_time_seconds=start_time_seconds,
+        ),
     }
 
     summary_path = write_summary(output_dir, summary)

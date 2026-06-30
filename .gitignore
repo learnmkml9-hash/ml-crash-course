@@ -1,49 +1,38 @@
-.venv/
-__pycache__/
-.ipynb_checkpoints/
-.DS_Store
-*.pyc
-# Local ML data and model artifacts
-data/
-checkpoints/
-*.pt
-*.pth
-*.tar.gz
-
-# Hugging Face outputs
-hf_outputs/
-saved_models/
-
+# Python virtual environments
 .venv/
 .venv312/
-data/
-checkpoints/
-hf_outputs/
-saved_models/
-*.pt
-*.pth
-*.tar.gz
+
+# Python cache files
 __pycache__/
-.ipynb_checkpoints/
-.DS_Store
 *.pyc
+.ipynb_checkpoints/
 
-# Cluster logs and run outputs
-logs/*.out
-logs/*.err
-runs/
-slurm-*.out
+# macOS
+.DS_Store
 
-# Cluster logs and run outputs
-logs/*.out
-logs/*.err
-runs/
-slurm-*.out
+# Local ML data
+data/
 
-# Cluster/HF artifacts
-hf_outputs/
-saved_models/
+# Model checkpoints and artifacts
 checkpoints/
+saved_models/
+hf_outputs/
 *.pt
 *.pth
+*.ckpt
 *.safetensors
+*.bin
+*.tar.gz
+
+# Local experiment outputs
+runs/
+outputs/
+
+# Slurm and cluster logs
+logs/*.out
+logs/*.err
+slurm-*.out
+
+# Hugging Face / experiment caches if created inside repo
+.cache/
+hf_cache/
